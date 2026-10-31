@@ -1,0 +1,7 @@
+idf_component_register(SRCS "main.c" INCLUDE_DIRS "." REQUIRES driver esp_timer)
+option(EPD_SOFTWARE_SPI "Use slow GPIO SPI for comparison on the same pins" OFF)
+if(EPD_SOFTWARE_SPI)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE EPD_SOFTWARE_SPI=1)
+else()
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE EPD_SOFTWARE_SPI=0)
+endif()

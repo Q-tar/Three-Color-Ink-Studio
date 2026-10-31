@@ -1,0 +1,18 @@
+新版 PCB：Board2 / Schematic2，ESP-IDF 5.4，ESP32-C3 Super Mini。
+源代码 main\main.c；引脚 BUSY=3、RST=1、DC=5、SCLK=4、MOSI=6、CS=7。
+上电显示 assets\source.jpg 转换后的卡通图片，黑色线条、红色粉红细节、白色背景。
+方图等比例缩到 104×104 居中显示，上下留白。刷新一次后关闭 DC/DC。
+点阵 main\epd_image.h；预览 assets\epd_preview_4x.png。
+
+在普通 PowerShell 中执行（脚本自动加载 IDF 环境）：
+cd "C:\Users\79455\Desktop\epd_hello_idf"
+powershell -ExecutionPolicy Bypass -File .\build_idf54.ps1 -Flash -Port COM9
+
+烧录前退出其他占用 COM9 的监控窗口。IDF 监控退出 Ctrl+]。
+启动日志应显示 EPD_IDF54_BOARD2_IMAGE_V7 和上述新引脚。
+STEP 6 为启动升压，STEP 7 为刷新，STEP 8 为关断升压。
+BUSY=0 表示忙，BUSY=1 表示就绪；120 秒超时停止并保持屏幕复位。
+超时后断电再试。屏幕实际显示才是成功依据。
+
+详细说明见 README.md；修改前代码、配置与文档保存在 backups。
+当前只编译，未替用户烧录 IDF 固件。

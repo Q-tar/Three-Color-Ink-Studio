@@ -1,0 +1,23 @@
+{
+  "chip": "esp32c3",
+  "flash_mode": "dio",
+  "flash_freq": "80m",
+  "flash_size": "2MB",
+  "files": [
+    {
+      "offset": "0x0",
+      "file": "bootloader.bin",
+      "sha256": "f543f0d1322bd1ee58805d85a7478227e63ed7c176fda05919cc7f092d98bfc0"
+    },
+    {
+      "offset": "0x10000",
+      "file": "epd_receiver.bin",
+      "sha256": "f160890d4c30a79fc308216eea1e3dedd600effe4a900fa66dfd0a17d9714e19"
+    },
+    {
+      "offset": "0x8000",
+      "file": "partition-table.bin",
+      "sha256": "7f00b6c042a89b15b0cac534f82ed988caf29278ff5700b0c511eb1b5bb7c820"
+    }
+  ]
+}

@@ -1,0 +1,27 @@
+# Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# ESP-IDF and PyInstaller outputs; retain defaults and firmware/bin
+build/
+dist/
+sdkconfig
+sdkconfig.old
+*.spec
+
+# Local generated files and history
+logs/
+backups/
+exports/
+*.zip
+*.bak
+
+# Editor and operating-system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini
