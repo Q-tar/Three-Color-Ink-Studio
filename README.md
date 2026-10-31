@@ -1,8 +1,8 @@
 # 墨迹 Ink Studio · ESP32-C3 墨水屏图片工作台
 
-基于 **ESP32-C3 Super Mini + ESP-IDF 5.4** 的黑白红墨水屏项目，包含桌面图片处理工具、USB 图片接收固件，以及一个独立的单图显示示例。
+基于 **ESP32-C3 Super Mini + ESP-IDF 5.4** 的黑白红墨水屏项目，包含桌面图片处理工具、USB/Wi-Fi 图片接收固件，以及一个独立的单图显示示例。
 
-在电脑上导入图片，调整裁切和黑白红效果，通过 USB 发送给 C3 完成全屏刷新。可以把一张图片保存到设备 Flash，之后直接重绘。
+在电脑上导入图片，调整裁切和黑白红效果，通过 USB 或 Wi-Fi 发送给 C3 完成全屏刷新。可以把一张图片保存到设备 Flash，之后直接重绘。
 
 当前适配 **新 PCB Board2 / Schematic2** 与 **E2213JS0C1/C2，104 × 212 黑白红屏**。固件使用 ESP-IDF C 实现，不依赖 Arduino。
 
@@ -18,6 +18,7 @@
 - [图片处理与数据格式](#图片处理与数据格式)
 - [保存与重绘](#保存与重绘)
 - [屏幕驱动流程](#屏幕驱动流程)
+- [Wi-Fi 无线传图](#wi-fi-无线传图接收固件-12)
 - [USB 通信协议](#usb-通信协议)
 - [测试与打包](#测试与打包)
 - [常见问题](#常见问题)
@@ -32,16 +33,16 @@
 | 构图 | 横竖屏、等比例完整显示、铺满裁切、旋转、缩放、平移 |
 | 颜色处理 | 亮度、对比度、黑色阈值、红色识别、黑白抖动、关闭红色色层 |
 | 预览与导出 | 黑白红预览；导出 PNG、C 数组、原始 BIN |
-| USB 连接 | COM 端口扫描、固件握手、请求 ID、CRC32 校验、连接错误提示 |
+| USB / Wi-Fi 连接 | COM 端口扫描、Wi-Fi 热点 HTTP 传图、固件握手、请求 ID、CRC32 校验、连接错误提示 |
 | 屏幕刷新 | 写入图像、开启升压、全刷、关闭升压；显示阶段进度 |
 | 设备保存 | NVS 保存一张图片，覆盖旧图；可重绘已存图片 |
 | 异常处理 | BUSY 超时、异常过快刷新、存储不可用、串口占用及写入超时提示 |
 | 模拟设备 | 无硬件体验握手、传图、保存与重绘 |
 | Windows 分发 | PyInstaller 打包，可运行 EXE 自检，交付包文件校验 |
 
-**当前边界：**只实现全屏刷新；没有局刷、自动轮播、联网传图、蓝牙传图、电池管理或 ESP32 深度休眠。接收固件保持 USB 在线，刷新结束关闭屏幕 DC/DC。
+**当前边界：**只实现全屏刷新；没有局刷、自动轮播、路由器联网模式、蓝牙传图、电池管理或 ESP32 深度休眠。接收固件保持 USB 和 Wi-Fi 热点在线，刷新结束关闭屏幕 DC/DC。
 
-开发验证环境为 **Windows x64、Python 3.13.14、ESP-IDF 5.4.4**。上位机及模拟通信已有 17 项自动测试通过记录；USB 接收固件 1.1 已编译通过，真实 USB 传图与新接收固件的实屏效果仍需硬件验证。原单图工程已有用户反馈的显示效果，两种固件的验证范围应分别看待。
+开发验证环境为 **Windows x64、Python 3.13.14、ESP-IDF 5.4.4**。接收固件当前版本为 **1.2**，已通过构建、21 项软件测试及打包 EXE 模拟自检；用户已反馈新版可用。自动测试不覆盖实屏成像、供电稳定性或长期运行，详细范围见 [验证记录](image_tool/验证记录.md)。
 
 ## 工程结构
 
@@ -66,6 +67,8 @@
 └── image_tool/
     ├── app.py                       # Qt 图形界面
     ├── image_core.py                # 图像处理、色层打包与导出
+    ├── wifi_device.py               # HTTP 工作线程、进度轮询
+    ├── test_wifi.py                 # HTTP 与 Qt 端到端模拟测试
     ├── protocol.py                  # USB 行协议编码与解析
     ├── device.py                    # 串口工作线程与模拟设备
     ├── requirements.txt             # 上位机运行依赖
@@ -78,13 +81,15 @@
     ├── assets/                      # 上位机示例图片
     ├── 使用说明.md                  # 上位机详细说明
     └── firmware/
-        ├── CMakeLists.txt           # 独立 USB 接收工程
+        ├── CMakeLists.txt           # 独立 USB/Wi-Fi 接收工程
         ├── sdkconfig.defaults       # 接收工程默认配置
         ├── build_firmware.ps1       # 编译并生成固件包
         ├── flash_firmware.ps1       # 校验与烧录预编译固件
         ├── make_bundle.py           # 提取固件、偏移及 SHA256
         ├── main/
-        │   ├── receiver.c           # USB 协议、刷新任务、NVS
+        │   ├── receiver.c           # 共用命令校验、刷新任务、NVS
+        │   ├── wifi_transport.c     # 热点、HTTP、会话事件日志
+        │   ├── Kconfig.projbuild    # 热点名称和密码
         │   ├── epd_driver.c         # SPI、初始化与刷新
         │   └── epd_driver.h
         └── bin/                    # 预编译接收固件与 bundle.json
@@ -128,10 +133,12 @@ SPI 使用 **Mode 0、MSB first、默认 1 MHz、手动 CS、无 MISO**。GPIO18
 
 ## 快速开始
 
+**从 GitHub 获取源码：**下载本仓库 ZIP 或执行 `git clone https://github.com/Q-tar/Three-Color-Ink-Studio.git`，然后按[从源码运行上位机](#从源码运行上位机)安装依赖并启动。仓库包含接收固件源码和预编译固件，不包含 Windows EXE；EXE 由维护者按[测试与打包](#测试与打包)生成后单独分发。
+
 ### 已有 Windows 使用包
 
 1. 完整解压“墨水屏上位机使用包”。
-2. 打开 `InkStudio/InkStudio.exe`，保留旁边的 `_internal`、`firmware` 等目录。
+2. 打开 `InkStudio-WiFi/InkStudio-WiFi.exe`，保留旁边的 `_internal`、`firmware` 等目录。
 3. 用 USB 数据线连接 C3，保证屏幕供电正常。
 4. 首次使用先安装配套接收固件，见下一节。
 5. 点击“扫描”，选择实际 COM 端口，点击“连接设备”。
@@ -150,7 +157,7 @@ SPI 使用 **Mode 0、MSB first、默认 1 MHz、手动 CS、无 MISO**。GPIO18
 
 ## 首次安装接收固件
 
-根目录的单图显示固件不会接收上位机图片。首次连接前，需要将程序替换为 `image_tool/firmware` 的配套 USB 接收固件。
+根目录的单图显示固件不会接收上位机图片。首次连接前，需要将程序替换为 `image_tool/firmware` 的配套 USB/Wi-Fi 接收固件。
 
 下文 **COM9 都是示例**，请替换为设备管理器中的实际端口。烧录前关闭上位机连接，以及占用端口的 IDF / Arduino / VS Code 串口监视器。
 
@@ -168,7 +175,7 @@ python -m pip install esptool==5.2.0
 powershell -ExecutionPolicy Bypass -File .\image_tool\firmware\flash_firmware.ps1 -Port COM9
 ```
 
-如果拿到的是上位机使用包，在解压后的 `InkStudio` 目录执行：
+如果拿到的是上位机使用包，在解压后的 `InkStudio-WiFi` 目录执行：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\firmware\flash_firmware.ps1 -Port COM9
@@ -240,7 +247,7 @@ idf.py --version
 
 若提示找不到 `idf.py`，当前终端尚未加载环境。先打开 ESP-IDF 终端或加载自己电脑安装位置下的环境脚本，再运行后续命令。
 
-### USB 接收固件：配合上位机使用
+### USB/Wi-Fi 接收固件：配合上位机使用
 
 在仓库根目录执行：
 
@@ -260,7 +267,7 @@ powershell -ExecutionPolicy Bypass -File .\build_firmware.ps1 -Flash -Port COM9
 
 普通 PowerShell 中可通过 `-IdfProfile "你的IDF环境脚本完整路径"` 显式加载自己的环境。脚本中的原电脑路径仅作为兼容回退，不要求其他电脑使用相同的 C/D 盘目录。
 
-接收工程通过 USB Serial/JTAG 驱动收发协议，普通日志配置在 UART0，避免与 USB 回复混用。使用上位机时不要同时让串口监视器占用 USB COM 端口。
+接收工程通过 USB Serial/JTAG 驱动收发协议，Wi-Fi 热点与 HTTP 接收同时启用，普通日志配置在 UART0，避免与 USB 回复混用。使用上位机时不要同时让串口监视器占用 USB COM 端口。
 
 ### 单图显示固件：上电显示内置图片
 
@@ -331,7 +338,7 @@ powershell -ExecutionPolicy Bypass -File .\tools\convert_image.ps1 -InputPath "D
 
 墨水屏断电后可保留已有画面，这一特性不依赖 NVS 保存。NVS 保存的是以后可重新刷出的图像数据。保存内容 CRC 与现有记录相同时，固件跳过重复写入。
 
-NVS 初始化失败时，接收固件 1.1 报告存储状态，上位机禁用保存功能，仍可取消保存后传图。固件不会自动擦除原 NVS。
+NVS 初始化失败时，接收固件 1.2 报告存储状态，上位机禁用保存功能，仍可取消保存后传图。固件不会自动擦除原 NVS。
 
 ## 屏幕驱动流程
 
@@ -365,6 +372,22 @@ NVS 初始化失败时，接收固件 1.1 报告存储状态，上位机禁用�
 - 串口断开不会中止已开始的刷新，刷新期间应保持供电。
 
 CRC 和 `accepted` 回复证明 C3 收到并校验了图像。屏幕 SPI 没有图像回读确认，`done` 只表示驱动流程完成，最终仍应观察实际画面。
+
+## Wi-Fi 无线传图（接收固件 1.2）
+
+不需要路由器：C3 自建 2.4 GHz 热点，电脑连接它后使用 HTTP 传图。USB 传图继续可用，首次安装或升级固件仍使用 USB；这不是 OTA 无线烧录。
+
+1. 先用 USB 数据线连接 C3，在上位机 **USB** 模式选择实际 COM 口，点击“首次安装接收固件”，烧入本次提供的 1.2 固件。旧 1.1 固件没有 Wi-Fi 功能。
+2. 保持 C3 和屏幕 PCB 供电，电脑 Wi-Fi 连接 **InkStudio-C3**，密码 **inkstudio123**。Windows 提示“无 Internet”时选择保持连接；这个热点不提供互联网。
+3. 打开新版上位机，在顶部选择 **Wi-Fi**，地址填写 **192.168.4.1**，点击“连接设备”，等待握手成功。
+4. 导入和调整图片，点击“发送到墨水屏”。保存、重绘、CRC 检查及刷新阶段提示与 USB 相同。
+5. 网络断开后，设备可能仍在刷新，请继续供电。上传响应丢失时，程序不会自动重传；重新连接并确认屏幕及设备忙状态后再决定是否发送。
+
+Wi-Fi 只替代数据传输，不能给屏幕供电。热点默认最多连接两台设备，同一时间全设备仅接受一个刷新任务。Wi-Fi 工作时功耗和供电需求高于 USB 单独待机；供电不稳可能重启。
+
+默认密码供本地测试使用，知道热点密码的人可以操作屏幕。可在接收工程运行 `idf.py menuconfig` → **Ink Studio Wi-Fi** 修改热点名称和密码（8～63 个 ASCII 字符），然后重新编译烧录。不会把家庭 Wi-Fi 凭据写入工程。当前没有自动联网、浏览器图片编辑页面或无线升级；浏览器访问 `http://192.168.4.1/` 仅返回接收器说明。
+
+若搜不到热点，确认烧入的是本次 1.2 接收固件并按 RESET；若连上后无法握手，检查电脑仍连接该热点、IP 地址、VPN/代理或防火墙。上位机 HTTP 客户端直接连接设备，不使用系统 HTTP 代理。固件网络初始化失败时会记录日志，USB 接收仍保留。
 
 ## USB 通信协议
 
@@ -415,7 +438,18 @@ packet = encode(message)
 | `done` | 流程结束，含 CRC、是否保存及耗时 |
 | `error` | 校验、刷新、存储等错误 |
 
-当前固件标识 `EPD_BOARD2_RECEIVER_1.1`。单行接收缓冲上限 10000 字节；未接收完整的请求中断超过 10 秒后被丢弃。上位机握手超时 10 秒，图像任务等待超时 400 秒；任务超时表示结果未知，不自动重复刷新。
+当前固件标识 `EPD_BOARD2_RECEIVER_1.2`。单行接收缓冲上限 10000 字节；未接收完整的请求中断超过 10 秒后被丢弃。上位机握手超时 10 秒，图像任务等待超时 400 秒；任务超时表示结果未知，不自动重复刷新。
+
+### HTTP 接口
+
+网络传输复用上述 `@EPD1 JSON\n` 命令内容和 JSON 事件字段：
+
+- 每次连接生成一个随机 32 位十六进制 `client`，相同连接的请求与进度查询使用同一值。
+- 连接时先 `GET /api/events?client=<client>`，保存返回的 `cursor`、`boot`，该请求不回放历史事件。
+- `POST /api/command?client=<client>`，请求体为完整命令包，最长 10000 字节。HTTP `{"ok":true}` 仅表示命令已交给解析器，是否接受以事件中的 `accepted` 或 `error` 为准。
+- 每约 300 ms `GET /api/events?client=<client>&after=<cursor>`，返回 `events`、新的 `cursor`、`boot`、`lost`。事件只发给所属会话，USB 回复仍仅发往 USB。
+- 设备保存最近 32 个 Wi-Fi 事件；`lost=true` 或 `boot` 改变时停止确认任务，提示结果未知，重新连接后查询状态。断线、超时、响应丢失均不会自动重发图片或重绘命令。
+- 两种传输共用命令互斥锁、忙状态和唯一显示任务；网络处理线程不执行屏幕刷新。热点使用 WPA2-PSK，HTTP 本身未加 TLS，不用于公网暴露。
 
 ## 测试与打包
 
@@ -424,10 +458,10 @@ packet = encode(message)
 在 `image_tool` 目录，安装依赖后运行：
 
 ```powershell
-.\.venv\Scripts\python.exe -m unittest -v test_core test_gui test_device
+.\.venv\Scripts\python.exe -m unittest -v test_core test_gui test_device test_wifi
 ```
 
-当前 17 项测试覆盖图像位序、横竖屏映射、黑红不重叠、透明背景、导出、协议分包与坏包恢复、模拟握手/传图/保存/重绘，以及串口错误、握手超时和存储错误恢复。
+当前 21 项测试覆盖图像位序、横竖屏映射、黑红不重叠、透明背景、导出、协议分包与坏包恢复、模拟握手/传图/保存/重绘，以及串口错误、握手超时、存储错误恢复和真实 HTTP 套接字模拟的 Wi-Fi 传图、保存重绘、CRC 错误、断线不重传、重启及事件丢失处理。
 
 测试使用图像数据和模拟设备，不验证实物焊接、升压电路或屏幕最终成像。
 
@@ -440,7 +474,7 @@ packet = encode(message)
 powershell -ExecutionPolicy Bypass -File .\package.ps1
 ```
 
-输出 `image_tool/dist/InkStudio/`，必须分发整个目录。脚本复制预编译接收固件、烧录脚本和说明，并运行 EXE 自检。
+输出 `image_tool/dist/InkStudio-WiFi/`，必须分发整个目录。脚本复制预编译接收固件、烧录脚本和说明，并运行 EXE 自检。
 
 打包时暂时限制 PATH，避免其他软件的同名 ICU / OpenSSL DLL 混入，结束后恢复环境。自检使用模拟设备，检查预览、握手、CRC 传图、保存、重绘和断开；报告写入 `image_tool/logs/packaged_self_check.json`。
 
@@ -452,7 +486,7 @@ powershell -ExecutionPolicy Bypass -File .\package.ps1
 .\image_tool\.venv\Scripts\python.exe .\tools\package_delivery.py --output "D:\epd_delivery"
 ```
 
-生成“墨水屏完整源码.zip”和“墨水屏上位机使用包.zip”，附交付说明与压缩包 SHA256。包内有逐文件 SHA256 清单；源码包排除本地环境、构建缓存和历史备份。同名 ZIP 已存在时拒绝覆盖，请选择新输出目录。
+生成“墨水屏完整源码.zip”和“墨水屏上位机使用包.zip”，附交付说明与压缩包 SHA256。包内有逐文件 SHA256 清单；源码包排除本地环境、构建缓存、sdkconfig 本机配置、导出文件和历史备份。使用包默认读取 `image_tool/dist/InkStudio-WiFi/`；若打包 EXE 时指定了 `-Name`，交付命令需使用对应的 `--name`。同名 ZIP 已存在时拒绝覆盖，请选择新输出目录。
 
 上传 GitHub 时提交源码与说明即可，生成的 Windows 使用包适合放在仓库 Releases。根目录 `.gitignore` 不会影响已被 Git 跟踪的文件。
 
@@ -502,7 +536,7 @@ powershell -ExecutionPolicy Bypass -File .\package.ps1
 
 以下是可继续实现的方向，当前尚未提供：
 
-- 接收固件真实 USB 传图、保存与断电恢复的硬件回归验证。
+- 补充真实 USB/Wi-Fi 传图、保存及断电恢复的可复现硬件回归记录。
 - 屏幕驱动、图像传输与应用任务进一步模块化。
 - 实时温度参数、受控刷新间隔与更多屏幕配置。
 - 多图存储、图库选择与定时轮播。
@@ -515,5 +549,6 @@ powershell -ExecutionPolicy Bypass -File .\package.ps1
 - [Pervasive Displays PDLS_EXT3_Basic_Global](https://github.com/PervasiveDisplays/PDLS_EXT3_Basic_Global)：初始化与全刷时序参考。
 - [上位机详细使用说明](image_tool/使用说明.md)
 - [交付说明](交付说明.md)
+- [版本记录](CHANGELOG.md)
 
 仓库当前尚未包含项目级 `LICENSE` 文件，本 README 不授予额外许可。第三方组件及引用资料遵循各自许可证；项目许可证可在维护者确定后单独补充。

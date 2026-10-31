@@ -1,0 +1,8 @@
+menu "Ink Studio Wi-Fi"
+    config INK_WIFI_SSID
+        string "SoftAP network name"
+        default "InkStudio-C3"
+    config INK_WIFI_PASSWORD
+        string "SoftAP password (8 to 63 ASCII characters)"
+        default "inkstudio123"
+endmenu

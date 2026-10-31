@@ -1,4 +1,4 @@
-// Native USB Serial/JTAG transport. Console logs remain on UART0 to avoid
+// Native USB Serial/JTAG and Wi-Fi HTTP transports. Console logs remain on UART0 to avoid
 // interleaving with framed replies. No display activity until a host requests it.
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,8 +16,9 @@
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "epd_driver.h"
+#include "wifi_transport.h"
 
-#define FW_VERSION "EPD_BOARD2_RECEIVER_1.1"
+#define FW_VERSION "EPD_BOARD2_RECEIVER_1.2"
 #define PREFIX "@EPD1 "
 #define MAX_LINE 10000
 #define SAVED_MAGIC 0x31445045U
@@ -29,12 +30,13 @@ typedef struct {
 
 typedef struct {
     int id;
+    char client[33]; // Empty means USB; otherwise the owning Wi-Fi session.
     bool save;
     uint32_t crc;
     uint8_t data[EPD_FRAME_BYTES];
 } image_job_t;
 
-static SemaphoreHandle_t tx_lock, state_lock;
+static SemaphoreHandle_t tx_lock, state_lock, command_lock;
 static QueueHandle_t jobs;
 static nvs_handle_t storage;
 static bool busy, saved_valid;
@@ -42,6 +44,7 @@ static bool storage_available;
 static esp_err_t storage_error;
 static uint32_t saved_crc;
 static int current_id;
+static char current_client[33];
 static char line_buffer[MAX_LINE + 1];
 
 static uint32_t image_crc(const uint8_t *data, size_t size)
@@ -88,9 +91,14 @@ static cJSON *reply(int id, const char *event)
     return obj;
 }
 
-static void send_reply(cJSON *obj)
+static void send_reply(cJSON *obj, const char *client)
 {
     if (!obj) return;
+    if (client && client[0]) {
+        wifi_publish(obj, client);
+        cJSON_Delete(obj);
+        return;
+    }
     char *json = cJSON_PrintUnformatted(obj);
     cJSON_Delete(obj);
     if (!json) return;
@@ -108,11 +116,11 @@ static void send_reply(cJSON *obj)
     free(json);
 }
 
-static void error_reply(int id, const char *message)
+static void error_reply(int id, const char *message, const char *client)
 {
     cJSON *obj = reply(id, "error");
     if (obj) cJSON_AddStringToObject(obj, "message", message);
-    send_reply(obj);
+    send_reply(obj, client);
 }
 
 static void add_crc(cJSON *obj, uint32_t crc)
@@ -172,7 +180,7 @@ static void progress(const char *stage, const char *message)
         cJSON_AddStringToObject(obj, "stage", stage);
         cJSON_AddStringToObject(obj, "message", message);
     }
-    send_reply(obj);
+    send_reply(obj, current_client);
 }
 
 static void display_task(void *arg)
@@ -181,6 +189,7 @@ static void display_task(void *arg)
     while (true) {
         if (xQueueReceive(jobs, &job, portMAX_DELAY) != pdTRUE) continue;
         current_id = job->id;
+        memcpy(current_client, job->client, sizeof(current_client));
         int64_t start = esp_timer_get_time();
         bool ok = epd_show_image(job->data, progress);
         cJSON *result = NULL;
@@ -210,11 +219,11 @@ static void display_task(void *arg)
         free(job);
         set_busy(false);
         // Publish completion only after a subsequent upload can be accepted.
-        send_reply(result);
+        send_reply(result, current_client);
     }
 }
 
-static void hello(int id)
+static void hello(int id, const char *client)
 {
     cJSON *obj = reply(id, "hello");
     if (obj) {
@@ -230,7 +239,7 @@ static void hello(int id)
         cJSON_AddBoolToObject(obj, "saved", saved_valid);
         xSemaphoreGive(state_lock);
     }
-    send_reply(obj);
+    send_reply(obj, client);
 }
 
 static bool number_is(cJSON *obj, const char *key, int expected)
@@ -239,13 +248,13 @@ static bool number_is(cJSON *obj, const char *key, int expected)
     return cJSON_IsNumber(item) && item->valuedouble == expected;
 }
 
-static void handle_line(const char *line)
+static void handle_line(const char *line, const char *client)
 {
     if (strncmp(line, PREFIX, strlen(PREFIX))) return;
-    cJSON *obj = cJSON_Parse(line + strlen(PREFIX));
+    cJSON *obj = cJSON_ParseWithOpts(line + strlen(PREFIX), NULL, true);
     if (!cJSON_IsObject(obj)) {
         cJSON_Delete(obj);
-        error_reply(0, "无效 JSON");
+        error_reply(0, "无效 JSON", client);
         return;
     }
     cJSON *id_item = cJSON_GetObjectItemCaseSensitive(obj, "id");
@@ -253,44 +262,45 @@ static void handle_line(const char *line)
     if (!cJSON_IsNumber(id_item) || !isfinite(id_item->valuedouble) ||
         id_item->valuedouble < 1 || id_item->valuedouble > 2147483647.0 ||
         floor(id_item->valuedouble) != id_item->valuedouble || !cJSON_IsString(cmd_item)) {
-        error_reply(0, "无效请求 ID 或命令");
+        error_reply(0, "无效请求 ID 或命令", client);
         cJSON_Delete(obj);
         return;
     }
     int id = id_item->valueint;
     const char *cmd = cmd_item->valuestring;
     if (!strcmp(cmd, "hello") || !strcmp(cmd, "status")) {
-        hello(id);
+        hello(id, client);
         cJSON_Delete(obj);
         return;
     }
     if (strcmp(cmd, "image") && strcmp(cmd, "restore")) {
-        error_reply(id, "不支持的命令");
+        error_reply(id, "不支持的命令", client);
         cJSON_Delete(obj);
         return;
     }
     if (is_busy()) {
-        error_reply(id, "设备正在刷新，请等待完成");
+        error_reply(id, "设备正在刷新，请等待完成", client);
         cJSON_Delete(obj);
         return;
     }
     if (!storage_available && (!strcmp(cmd, "restore") ||
         cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(obj, "save")))) {
-        error_reply(id, "存储初始化失败：可取消保存后传图显示，已有 NVS 数据未被擦除");
+        error_reply(id, "存储初始化失败：可取消保存后传图显示，已有 NVS 数据未被擦除", client);
         cJSON_Delete(obj);
         return;
     }
     image_job_t *job = calloc(1, sizeof(*job));
     if (!job) {
-        error_reply(id, "内存不足");
+        error_reply(id, "内存不足", client);
         cJSON_Delete(obj);
         return;
     }
     job->id = id;
+    if (client) memcpy(job->client, client, sizeof(job->client));
     bool valid = false;
     if (!strcmp(cmd, "restore")) {
         valid = read_saved(job->data, &job->crc);
-        if (!valid) error_reply(id, "没有通过校验的已保存图片");
+        if (!valid) error_reply(id, "没有通过校验的已保存图片", client);
     } else {
         cJSON *data = cJSON_GetObjectItemCaseSensitive(obj, "data");
         cJSON *crc = cJSON_GetObjectItemCaseSensitive(obj, "crc");
@@ -299,17 +309,17 @@ static void handle_line(const char *line)
         if (!number_is(obj, "width", EPD_WIDTH) || !number_is(obj, "height", EPD_HEIGHT) ||
             !cJSON_IsString(data) || !cJSON_IsString(crc) || strlen(crc->valuestring) != 8 ||
             !cJSON_IsBool(save)) {
-            error_reply(id, "图像尺寸或字段类型错误");
+            error_reply(id, "图像尺寸或字段类型错误", client);
         } else if (mbedtls_base64_decode(job->data, sizeof(job->data), &decoded,
                                         (const unsigned char *)data->valuestring, strlen(data->valuestring)) != 0 ||
                    decoded != EPD_FRAME_BYTES) {
-            error_reply(id, "图像解码或长度错误，必须为 5512 字节");
+            error_reply(id, "图像解码或长度错误，必须为 5512 字节", client);
         } else {
             char expected[9];
             job->crc = image_crc(job->data, EPD_FRAME_BYTES);
             snprintf(expected, sizeof(expected), "%08lx", (unsigned long)job->crc);
-            if (strcmp(expected, crc->valuestring)) error_reply(id, "CRC 校验失败");
-            else if (!valid_planes(job->data)) error_reply(id, "黑色与红色色层发生重叠");
+            if (strcmp(expected, crc->valuestring)) error_reply(id, "CRC 校验失败", client);
+            else if (!valid_planes(job->data)) error_reply(id, "黑色与红色色层发生重叠", client);
             else {
                 valid = true;
                 job->save = cJSON_IsTrue(save);
@@ -325,20 +335,30 @@ static void handle_line(const char *line)
     cJSON *ack = reply(id, "accepted");
     add_crc(ack, job->crc);
     if (ack) cJSON_AddNumberToObject(ack, "bytes", EPD_FRAME_BYTES);
-    send_reply(ack);
+    send_reply(ack, client);
     if (xQueueSend(jobs, &job, 0) != pdTRUE) {
         set_busy(false);
         free(job);
-        error_reply(id, "图像队列已满");
+        error_reply(id, "图像队列已满", client);
     }
+}
+
+static void dispatch_line(const char *line, const char *client)
+{
+    // Both transports serialize validation and busy reservation. No second
+    // client can slip between checking busy and queueing the display job.
+    xSemaphoreTake(command_lock, portMAX_DELAY);
+    handle_line(line, client);
+    xSemaphoreGive(command_lock);
 }
 
 void app_main(void)
 {
     tx_lock = xSemaphoreCreateMutex();
+    command_lock = xSemaphoreCreateMutex();
     state_lock = xSemaphoreCreateMutex();
     jobs = xQueueCreate(1, sizeof(image_job_t *));
-    configASSERT(tx_lock && state_lock && jobs);
+    configASSERT(tx_lock && state_lock && command_lock && jobs);
     // Start USB first. Storage errors must not turn into a silent reboot loop
     // that looks like a disconnected board. Never erase previous NVS data.
     usb_serial_jtag_driver_config_t config = {.tx_buffer_size=4096, .rx_buffer_size=16384};
@@ -352,7 +372,10 @@ void app_main(void)
     saved_valid = read_saved(NULL, &saved_crc);
     ESP_ERROR_CHECK(epd_io_init());
     configASSERT(xTaskCreate(display_task, "epd_display", 8192, NULL, 4, NULL) == pdPASS);
-    send_reply(reply(0, "ready"));
+    esp_err_t wifi_error = wifi_transport_start(dispatch_line);
+    if (wifi_error != ESP_OK)
+        ESP_LOGE("receiver", "Wi-Fi unavailable: %s; USB remains available", esp_err_to_name(wifi_error));
+    send_reply(reply(0, "ready"), NULL);
     size_t length = 0;
     bool overflow = false;
     int64_t last_byte = 0;
@@ -363,7 +386,7 @@ void app_main(void)
             if (length && esp_timer_get_time()-last_byte > 10000000LL) {
                 length = 0;
                 overflow = false;
-                error_reply(0, "接收中断超过 10 秒，已丢弃未完成的图像");
+                error_reply(0, "接收中断超过 10 秒，已丢弃未完成的图像", NULL);
             }
             continue;
         }
@@ -374,8 +397,8 @@ void app_main(void)
                 if (!overflow) {
                     line_buffer[length] = 0;
                     if (length && line_buffer[length-1] == '\r') line_buffer[length-1] = 0;
-                    handle_line(line_buffer);
-                } else error_reply(0, "接收行过长，已丢弃");
+                    dispatch_line(line_buffer, NULL);
+                } else error_reply(0, "接收行过长，已丢弃", NULL);
                 length = 0;
                 overflow = false;
             } else if (length < MAX_LINE && !overflow) {

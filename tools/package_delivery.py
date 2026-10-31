@@ -8,7 +8,8 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 SKIP_DIRS = {'.git', '.venv', 'venv', '__pycache__', 'build', 'dist',
-             'backups', 'logs', '.vscode', '.pytest_cache'}
+             'backups', 'logs', 'exports', '.vscode', '.idea', '.pytest_cache'}
+SKIP_FILES = {'sdkconfig', 'sdkconfig.old', '.DS_Store', 'Thumbs.db', 'Desktop.ini'}
 
 
 def digest(data):
@@ -21,18 +22,19 @@ def source_files():
                          and not (Path(directory) / d).is_symlink())
         for name in sorted(files):
             path = Path(directory) / name
-            if path.is_symlink() or path.suffix.lower() in {'.pyc', '.pyo', '.bak'}:
+            if (path.is_symlink() or name in SKIP_FILES
+                    or path.suffix.lower() in {'.pyc', '.pyo', '.bak', '.spec', '.zip'}):
                 continue
             yield path, 'epd_hello_idf/' + path.relative_to(ROOT).as_posix()
 
 
-def runtime_files():
-    base = ROOT / 'image_tool/dist/InkStudio'
-    if not (base / 'InkStudio.exe').is_file():
+def runtime_files(name='InkStudio-WiFi'):
+    base = ROOT / 'image_tool' / 'dist' / name
+    if not (base / f'{name}.exe').is_file():
         raise RuntimeError('Build the EXE with image_tool/package.ps1 first')
     for path in sorted(base.rglob('*')):
         if path.is_file() and not path.is_symlink():
-            yield path, 'InkStudio/' + path.relative_to(base).as_posix()
+            yield path, name + '/' + path.relative_to(base).as_posix()
     yield ROOT / '交付说明.md', '交付说明.md'
 
 
@@ -59,13 +61,18 @@ def make_zip(target, files):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--name', default='InkStudio-WiFi',
+                        help='EXE directory name used by image_tool/package.ps1 -Name')
     options = parser.parse_args()
+    if not options.name or any(c not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-' for c in options.name):
+        parser.error('--name must contain only ASCII letters, digits, underscores or hyphens')
     output = options.output.resolve()
     if output == ROOT or ROOT in output.parents:
         raise ValueError('Choose an output directory outside the project')
+    runtime = list(runtime_files(options.name))
     output.mkdir(parents=True, exist_ok=True)
     records = [make_zip(output / '墨水屏完整源码.zip', source_files()),
-               make_zip(output / '墨水屏上位机使用包.zip', runtime_files())]
+               make_zip(output / '墨水屏上位机使用包.zip', runtime)]
     (output / '交付说明.md').write_bytes((ROOT / '交付说明.md').read_bytes())
     (output / '压缩包校验.json').write_text(
         json.dumps(records, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')

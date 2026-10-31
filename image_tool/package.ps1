@@ -1,3 +1,4 @@
+param([ValidatePattern('^[A-Za-z0-9_-]+$')][string]$Name = 'InkStudio-WiFi')
 $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
 # Resolve DLLs only from this Python environment and Windows. Other tools on
@@ -12,19 +13,20 @@ try {
         (Join-Path $env:SystemRoot 'System32'),
         $env:SystemRoot
     ) -join ';'
-    & '.\.venv\Scripts\python.exe' -m PyInstaller --noconfirm --clean --windowed --name InkStudio --add-data 'assets;assets' app.py
+    & '.\.venv\Scripts\python.exe' -m PyInstaller --noconfirm --clean --windowed --name $Name --add-data 'assets;assets' app.py
     if ($LASTEXITCODE -ne 0) { throw 'Application packaging failed' }
 } finally {
     $env:PATH = $epdOriginalPath
 }
-New-Item -ItemType Directory -Path 'dist\InkStudio\firmware\bin' -Force | Out-Null
-Get-ChildItem -LiteralPath 'firmware\bin' -File | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination 'dist\InkStudio\firmware\bin' -Force }
-Copy-Item -LiteralPath 'firmware\flash_firmware.ps1' -Destination 'dist\InkStudio\firmware\flash_firmware.ps1' -Force
-Get-ChildItem -LiteralPath $PSScriptRoot -Filter '*.md' | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination 'dist\InkStudio' -Force }
+$epdOutput = Join-Path $PSScriptRoot "dist\$Name"
+New-Item -ItemType Directory -Path "$epdOutput\firmware\bin" -Force | Out-Null
+Get-ChildItem -LiteralPath 'firmware\bin' -File | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination "$epdOutput\firmware\bin" -Force }
+Copy-Item -LiteralPath 'firmware\flash_firmware.ps1' -Destination "$epdOutput\firmware\flash_firmware.ps1" -Force
+Get-ChildItem -LiteralPath $PSScriptRoot -Filter '*.md' | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $epdOutput -Force }
 New-Item -ItemType Directory -Path 'logs' -Force | Out-Null
 $epdCheckReport = Join-Path $PSScriptRoot 'logs\packaged_self_check.json'
 if (Test-Path -LiteralPath $epdCheckReport) { Remove-Item -LiteralPath $epdCheckReport }
-$epdCheck = Start-Process -FilePath (Join-Path $PSScriptRoot 'dist\InkStudio\InkStudio.exe') -ArgumentList @('--self-check', ('"' + $epdCheckReport + '"')) -WindowStyle Hidden -PassThru
+$epdCheck = Start-Process -FilePath (Join-Path $epdOutput "$Name.exe") -ArgumentList @('--self-check', ('"' + $epdCheckReport + '"')) -WindowStyle Hidden -PassThru
 if (-not $epdCheck.WaitForExit(30000)) {
     $epdCheck.Kill()
     throw 'Packaged runtime self-check timed out'

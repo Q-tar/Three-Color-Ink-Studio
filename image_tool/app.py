@@ -16,13 +16,14 @@ from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QComboBox, QSlider, QCheckBox, QFileDialog, QMessageBox, QPlainTextEdit,
-    QFrame, QProgressBar, QScrollArea, QSizePolicy, QSplitter,
+    QFrame, QProgressBar, QScrollArea, QSizePolicy, QSplitter, QLineEdit,
 )
 from serial.tools import list_ports
 
 from image_core import Options, convert, load_image, export_header
 from protocol import image_command
 from device import SerialWorker
+from wifi_device import WifiWorker
 
 ROOT = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
 RESOURCE = Path(getattr(sys, "_MEIPASS", ROOT))
@@ -205,6 +206,15 @@ class MainWindow(QMainWindow):
         bar.addLayout(title)
         bar.addStretch()
         bar.addWidget(label("2.13 英寸  ·  黑 / 白 / 红", "badge"))
+        self.transport = QComboBox()
+        self.transport.addItems(["USB", "Wi-Fi"])
+        self.transport.currentIndexChanged.connect(self.update_buttons)
+        bar.addWidget(self.transport)
+        self.wifi_address = QLineEdit(str(self.settings.value("wifi_address", "192.168.4.1")))
+        self.wifi_address.setMaximumWidth(185)
+        self.wifi_address.setPlaceholderText("192.168.4.1")
+        self.wifi_address.setToolTip("先连接热点 InkStudio-C3，密码 inkstudio123；此处填写设备 IP。")
+        bar.addWidget(self.wifi_address)
         self.ports = QComboBox()
         self.ports.setMinimumWidth(205)
         bar.addWidget(self.ports)
@@ -213,6 +223,8 @@ class MainWindow(QMainWindow):
         self.connect_btn = button("连接设备", self.toggle_connection, True)
         bar.addWidget(self.connect_btn)
         layout.addWidget(header)
+        self.wifi_hint = label("先连接电脑 Wi-Fi：InkStudio-C3  ·  密码：inkstudio123  ·  地址：192.168.4.1  ·  提示无 Internet 时保持连接；设备仍需供电。", "muted", True)
+        layout.addWidget(self.wifi_hint)
 
         splitter = QSplitter(Qt.Vertical)
         upper = QWidget()
@@ -485,27 +497,29 @@ class MainWindow(QMainWindow):
             return
         self.ready = False
         self.device_busy = False
-        self.worker = SerialWorker(self.ports.currentData(), self)
+        wifi = self.transport.currentIndex() == 1
+        self.worker = WifiWorker(self.wifi_address.text(), self) if wifi else SerialWorker(self.ports.currentData(), self)
         self.worker.opened.connect(self.on_opened)
         self.worker.received.connect(self.on_event)
         self.worker.log.connect(self.log)
         self.worker.failed.connect(self.on_serial_error)
         self.worker.transferred.connect(self.on_transferred)
         self.worker.start()
-        self.status_label.setText("正在打开串口…")
+        self.status_label.setText("正在连接 Wi-Fi 设备…" if wifi else "正在打开串口…")
         self.update_buttons()
 
     def on_opened(self):
         self.handshake_started = time.monotonic()
         self.last_hello = 0
-        self.status_label.setText("串口已打开 · 等待接收固件握手")
-        self.log("串口已打开，正在识别设备。")
+        name = "Wi-Fi 已连接" if self.transport.currentIndex() == 1 else "串口已打开"
+        self.status_label.setText(name + " · 等待接收固件握手")
+        self.log(name + "，正在识别设备。")
 
     def disconnect_device(self):
         if self.worker:
             self.worker.requestInterruption()
             if not self.worker.wait(6500):
-                self.log("正在等待串口释放，请稍后重试。")
+                self.log("正在等待连接关闭，请稍后重试。")
                 return False
             self.worker.deleteLater()
             self.worker = None
@@ -520,9 +534,10 @@ class MainWindow(QMainWindow):
         return True
 
     def on_serial_error(self, text):
-        self.log("串口错误：" + text)
+        wifi = self.transport.currentIndex() == 1
+        self.log("连接错误：" + text)
         self.disconnect_device()
-        self.status_label.setText("连接失败 · 端口已释放")
+        self.status_label.setText("连接失败 · 网络连接已关闭" if wifi else "连接失败 · 端口已释放")
         self.stage_label.setText(text.split("\n", 1)[0])
 
     def next_id(self):
@@ -649,10 +664,11 @@ class MainWindow(QMainWindow):
         now = time.monotonic()
         if self.worker and self.worker.isRunning() and self.handshake_started:
             if now-self.handshake_started > 10:
-                self.log("握手超时：未收到兼容的接收固件回复。端口已释放，可点击首次安装接收固件。")
+                wifi = self.transport.currentIndex() == 1
+                self.log("握手超时：未收到兼容的接收固件回复。请检查连接及接收固件。")
                 self.disconnect_device()
-                self.status_label.setText("未识别到接收固件 · 端口已释放")
-                self.stage_label.setText("请先安装配套接收固件；已安装则按 RESET 或重新插拔 C3 的 USB 后连接。")
+                self.status_label.setText("Wi-Fi 握手超时 · 连接已关闭" if wifi else "未识别到接收固件 · 端口已释放")
+                self.stage_label.setText("请连接 InkStudio-C3 热点并核对设备地址；首次安装固件请切回 USB。" if wifi else "请先安装配套接收固件；已安装则按 RESET 或重新插拔 C3 的 USB 后连接。")
                 return
             if now-self.last_hello >= 1.5:
                 self.worker.send({"id": self.next_id(), "cmd": "hello"})
@@ -667,13 +683,21 @@ class MainWindow(QMainWindow):
         flashing = self.process is not None
         connected = self.worker is not None
         working = self.active_id is not None or self.device_busy
+        wifi = self.transport.currentIndex() == 1
+        self.transport.setEnabled(not connected and not flashing)
+        self.wifi_address.setVisible(wifi)
+        self.wifi_hint.setVisible(wifi)
+        self.wifi_address.setEnabled(not connected and not flashing)
+        self.ports.setVisible(not wifi)
+        self.scan_btn.setVisible(not wifi)
         self.connect_btn.setText("断开连接" if connected else "连接设备")
         self.connect_btn.setEnabled(not flashing)
         self.ports.setEnabled(not connected and not flashing)
         self.scan_btn.setEnabled(not connected and not flashing)
         self.send_btn.setEnabled(self.ready and not working and not flashing and self.result is not None)
         self.restore_btn.setEnabled(self.ready and not working and not flashing and self.saved_image)
-        self.flash_btn.setEnabled(not working and not flashing and self.ports.currentData() != "SIMULATOR")
+        self.flash_btn.setEnabled(not wifi and not working and not flashing and self.ports.currentData() != "SIMULATOR")
+        self.flash_btn.setToolTip("首次安装或更新固件请切换 USB 模式并连接数据线。")
         self.export_btn.setEnabled(self.result is not None)
 
     def flash_firmware(self):
@@ -759,11 +783,12 @@ class MainWindow(QMainWindow):
             event.ignore()
             return
         self.settings.setValue("options", json.dumps(asdict(self.options)))
+        self.settings.setValue("wifi_address", self.wifi_address.text().strip())
         self.settings.sync()
         event.accept()
 
 
-def packaged_self_check(qt, report_path):
+def packaged_self_check(qt, report_path, wifi_address=None):
     """Exercise the distributed runtime without opening a window or a real port."""
     checks = []
     window = None
@@ -799,6 +824,21 @@ def packaged_self_check(qt, report_path):
             checks.append("restore_saved_image")
             assert window.disconnect_device()
             checks.append("disconnect")
+            if wifi_address:
+                window.transport.setCurrentIndex(1)
+                window.wifi_address.setText(wifi_address)
+                window.toggle_connection()
+                until(lambda: window.ready)
+                checks.append("HTTP_wifi_handshake")
+                window.send_image()
+                until(lambda: window.active_id is None)
+                assert window.progress.value() == 100 and window.saved_image
+                checks.append("HTTP_wifi_upload_save")
+                window.restore_image()
+                until(lambda: window.active_id is None)
+                assert window.progress.value() == 100
+                checks.append("HTTP_wifi_restore")
+                assert window.disconnect_device()
             result = {"ok": True, "checks": checks, "frozen": bool(getattr(sys, "frozen", False))}
     except Exception as exc:
         result = {"ok": False, "checks": checks, "error": repr(exc)}
@@ -816,6 +856,7 @@ def main():
     parser.add_argument("--simulate", action="store_true")
     parser.add_argument("--image")
     parser.add_argument("--self-check", metavar="REPORT_JSON")
+    parser.add_argument("--self-check-wifi-address", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.self_check:
         os.environ["QT_QPA_PLATFORM"] = "offscreen"
@@ -824,7 +865,7 @@ def main():
     app.setFont(QFont("Microsoft YaHei UI", 10))
     app.setStyleSheet(STYLE)
     if args.self_check:
-        sys.exit(packaged_self_check(app, args.self_check))
+        sys.exit(packaged_self_check(app, args.self_check, args.self_check_wifi_address))
     window = MainWindow(args.simulate, args.image)
     window.show()
     sys.exit(app.exec())
